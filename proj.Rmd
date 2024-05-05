@@ -1,0 +1,328 @@
+---
+title: "Data Mining Project"
+author: "Fatemeh Golpour"
+date: "2024-04-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries
+```{r Libraries}
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(tidyr)
+library(tidytext)
+library(quanteda)
+library(caret)
+library(arules)
+library(arulesViz)
+library(randomForest)
+```
+
+
+## Data Understanding
+
+```{r}
+anime_data <- read.csv("Anime.csv")
+summary(anime_data)
+```
+
+#```{r}
+#head(anime_data)
+
+#```
+
+```{r}
+dim(anime_data)
+```
+
+```{r}
+# Find numerical features
+numerical_features <- sapply(anime_data, is.numeric)
+# Filter numerical data
+numerical_data <- anime_data[, numerical_features]
+```
+Plot histograms of the numerical data:
+
+```{r}
+# Plotting Layout: 3 rows and 3 column
+par(mfrow = c(3, 3))
+for (col in colnames(numerical_data)) {
+    hist(numerical_data[[col]],
+         main = paste("Histogram of", col),  
+         xlab = col,  
+         ylab = "Frequency",  
+         col = "lightblue", 
+         breaks = 20)
+}
+```
+Plot correlation heatmap of the numerical data:
+
+
+```{r}
+correlation_matrix <- cor(numerical_data, use = "pairwise.complete.obs")
+
+# Reshape correlation matrix
+melted_corr_matrix <- melt(correlation_matrix)
+
+heatmap <- ggplot(melted_corr_matrix, aes(x = Var1, y = Var2, fill = value)) +
+           geom_tile() +
+           scale_fill_gradient(low = "blue", high = "black") +
+           labs(title = "Correlation Heatmap of Numerical Data") +
+           theme_minimal()+
+           # Rotate the x-axis text (column names) to be vertical
+           theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+print(heatmap)
+```
+## Data Preparation
+
+Check for missing values in the dataset:
+
+```{r}
+
+missing_per_column <- colSums(is.na(anime_data))
+
+print("Missing values per column:")
+print(missing_per_column)
+
+```
+```{r}
+missing_episodes <- anime_data[is.na(anime_data$Episodes), ]
+
+```
+
+Replace the the missing values in Episodes with 1, if the column 'Type' is equal to: OVA, Movie or Special, otherwise replace them with the average of the column:
+```{r}
+# Calculate the average of Episodes for non-OVA, Movie, or Special types
+average_episodes <- mean(anime_data$Episodes[!anime_data$Type %in% c("OVA", "Movie", "Special")], na.rm = TRUE)
+
+# Replace missing values in Episodes
+anime_data <- anime_data %>%
+  mutate(Episodes = case_when(
+    is.na(Episodes) & Type %in% c("OVA", "Movie", "Special") ~ as.integer(1),
+    is.na(Episodes) ~ as.integer(average_episodes),
+    TRUE ~ Episodes
+  ))
+```
+
+Replace the missing values in Score, Scored_Users, Ranked and Duration_Minutes with the average of the columns.
+
+```{r}
+# Calculate the average of each column
+average_score <- mean(anime_data$Score, na.rm = TRUE)
+average_scored_users <- mean(anime_data$Scored_Users, na.rm = TRUE)
+average_ranked <- mean(anime_data$Ranked, na.rm = TRUE)
+average_duration_minutes <- mean(anime_data$Duration_Minutes, na.rm = TRUE)
+
+
+# Replace missing values in Score, Scored_Users, and Ranked with the average of each column
+anime_data <- anime_data %>%
+  mutate(
+    Score = if_else(is.na(Score), average_score, Score),
+    Scored_Users = if_else(is.na(Scored_Users), average_scored_users, as.numeric(Scored_Users)),
+    Ranked = if_else(is.na(Ranked), average_ranked, as.numeric(Ranked)),
+    Duration_Minutes = if_else(is.na(Duration_Minutes), average_duration_minutes, as.numeric(Duration_Minutes))
+
+  )
+```
+
+
+Identify 'Unknown' values:
+
+```{r}
+unknown_counts <- sapply(anime_data, function(column) sum(column == "Unknown"))
+
+#print("Number of 'unknown' values per column:")
+#print(unknown_counts)
+
+```
+
+Since generating random text might affect the accuracy of our models, we do not change the unknown values.
+
+```{r}
+str(anime_data)
+
+```
+
+```{r}
+text_columns <- colnames(anime_data)[sapply(anime_data, is.character)]
+
+```
+Clean the text columns:
+```{r}
+clean_text_columns <- function(data, text_columns) {
+    for (col in text_columns) {
+        # Tokenize the data and clean it
+        tokens_col <- tokens(data[[col]], remove_punct = TRUE, remove_symbols = TRUE) %>%
+            tokens_tolower() %>%
+            tokens_remove(pattern = "[^a-zA-Z\\s]") %>%
+            tokens_remove(pattern = stopwords("en"))
+        
+        # Convert tokens back to single strings
+        data[[col]] <- sapply(tokens_col, paste, collapse = " ")
+        
+        # Handle missing values
+        data[[col]][is.na(data[[col]])] <- "Unknown"
+    }
+    
+    return(data)
+}
+
+text_columns <- c("Title", "Synonyms", "Japanese", "English", "Synopsis", "Start_Aired", "End_Aired", "Premiered", "Broadcast", "Producers", "Licensors", "Studios", "Genres", "Themes", "Demographics" )
+
+anime_data_cleaned_text <- clean_text_columns(anime_data, text_columns)
+
+```
+
+
+Convert the potential categorical columns to factors:
+
+```{r}
+categorical_columns <- c("Type", "Status", "Source", "Rating")
+
+for (col in categorical_columns) {
+        anime_data_cleaned_text[[col]] <- as.factor(anime_data_cleaned_text[[col]])
+}
+```
+
+Plot the frequencies of the categorical columns:
+
+```{r}
+categorical_columns <- c("Type", "Status", "Source", "Rating")
+
+for (column in categorical_columns) {
+    plot <- ggplot(anime_data_cleaned_text, aes_string(x = column)) +
+        geom_bar(fill = "blue") +  
+        labs(title = paste("Distribution of", column),
+             x = column,
+             y = "Frequency") +
+        theme(axis.text.x = element_text(angle = 90, hjust = 1))
+    
+    print(plot)
+}
+
+```
+
+We can observe that our data is imbalanced in our different categorical variables.
+Seems like performing a classification task to determine the rating of an anime could be interesting.
+
+```{r}
+ggplot(anime_data_cleaned_text, aes(x = "", fill = Rating)) +
+    geom_bar(width = 1, stat = "count") +
+    coord_polar(theta = "y") +
+    labs(title = paste("Distribution of ratings")) +
+    theme_void()
+
+```
+
+## Modelling
+
+  Create a new dataframe with the more relevant features to work with:
+
+```{r}
+anime_df <- data.frame(English=anime_data_cleaned_text$English, Synopsis=anime_data_cleaned_text$Synopsis,
+                       Studios=anime_data_cleaned_text$Studios, Genres=anime_data_cleaned_text$Genres,
+                       Themes=anime_data_cleaned_text$Themes, Demographics=anime_data_cleaned_text$Demographics,
+                       Type=anime_data_cleaned_text$Type, Status=anime_data_cleaned_text$Status,
+                       Source=anime_data_cleaned_text$Source, Score=anime_data$Score, Scored_Users=anime_data$Scored_Users,
+                       Ranked=anime_data$Ranked, Rating=anime_data_cleaned_text$Rating
+                       )
+# Columns you want to convert from factor to character
+columns_to_convert <- c("Type", "Status", "Source")
+
+# Convert specified factor columns to character
+anime_df[columns_to_convert] <- lapply(anime_df[columns_to_convert], as.character)
+```
+
+```{r}
+new_text_columns <- c("Type", "Status", "Source")
+
+anime_df <- clean_text_columns(anime_df, new_text_columns)
+
+```
+
+### Association Rule Mining
+To inspect the association rules, in order to demonstrate the rules better, I decided to use the three columns that have repetitive words in them but with different combinations: Genres, Themes, and Demographics.
+```{r}
+data_categorical <- data.frame(anime_df$Genres, anime_df$Themes, anime_df$Demographics)
+
+df_filtered <- data_categorical %>%
+  filter_all(all_vars(. != "unknown"))
+
+# Convert categorical columns to factors 
+categorical_cols <- sapply(df_filtered, is.character)
+df_filtered[categorical_cols] <- lapply(df_filtered[categorical_cols], as.factor)
+
+
+# Convert the data frame to a transaction object
+transactions <- as(df_filtered, "transactions")
+
+# Perform association rule mining using the apriori algorithm
+rules <- apriori(transactions, parameter = list(support = 0.01, confidence = 0.5))
+
+# View the association rules
+inspect(rules)
+
+```
+
+Plot the association rules:
+
+```{r}
+# Scatter plot of support vs confidence
+plot(rules, measure = c("support", "confidence"), shading = "lift", col = c("red", "blue"))
+```
+```{r}
+# Parallel coordinate plot
+plot(rules, method = "paracoord", control = list(reorder = TRUE), col = c("red", "blue", "green"))
+```
+
+### Classification Task - Random Forest
+
+```{r}
+
+text_columns <- c("English", "Genres", "Themes", "Demographics", "Type", "Status", "Source")
+# Convert textual data into a DTM(document-term matrix)
+dtm <- lapply(anime_df[text_columns], function(col) {
+    tokens_col <- tokens(col)
+    dfm_col <- dfm(tokens_col)
+    return(dfm_col)
+})
+combined_dfm <- Reduce(cbind, dtm)
+# Combine the DTM with other features 
+features <- convert(combined_dfm, to = "data.frame")
+# Prepare the labels for classification
+features$Rating <- as.factor(anime_df$Rating)
+
+duplicate_columns <- colnames(features)[duplicated(colnames(features))]
+print(duplicate_columns)
+if (length(duplicate_columns) > 0) {
+    for (i in seq_along(duplicate_columns)) {
+        col_index <- which(colnames(features) == duplicate_columns[i])
+        for (j in seq_along(col_index)) {
+            colnames(features)[col_index[j]] <- paste0(duplicate_columns[i], "_", j)
+        }
+    }
+}
+
+trainIndex <- createDataPartition(features$Rating, p = .7, list = FALSE)
+trainData <- features[trainIndex, ]
+testData <- features[-trainIndex, ]
+
+# Train a classification model - Random Forest
+model <- train(Rating ~ ., data = trainData, method = "rf",
+               tuneGrid = expand.grid(mtry = c(2, 3, 4)),
+               trControl = trainControl(method = "cv", number = 5))
+
+# Evaluate the model
+predictions <- predict(model, testData)
+confusionMatrix(predictions, testData$Rating)
+
+```
+
+Unfortunately, I don't have enough computing power to run this on the complete textual data(synopsis) and get the results I want, as my laptop crashed several times during my attempts.
+After this, I was planning to use the textual data to perform a regression task and predict the numerical data(Score, Scored_Users, and Ranked).
